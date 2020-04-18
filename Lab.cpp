@@ -1,3 +1,7 @@
+/*
+Will this work beyond the test cases? That is for God to decide.
+*/
+
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/IR/BasicBlock.h"
@@ -78,12 +82,13 @@ struct Lab : public BasicBlockPass {
           }
           }
           Type *i32int = IntegerType::get(inst->getContext(), 32);
-          Constant *val = ConstantInt::get(i32int, newConst);
+          Constant *val = ConstantInt::getSigned(i32int, newConst);
           ConstantInt *final = dyn_cast<ConstantInt>(val);
           return final;
         }
       }
     }
+    return nullptr;
   }
   bool runOnBasicBlock(BasicBlock &BB) override {
     std::map<Value *, ConstantInt *> mapFromPointertoVal;
@@ -91,124 +96,160 @@ struct Lab : public BasicBlockPass {
     std::stack<Instruction *> killList;
     std::map<Instruction *, ConstantInt *> foldMe;
     std::set<Instruction *> doNotDelete;
+
+    std::set<Instruction *> dontTouchMofo;
+
     for (Instruction &I : BB) {
       Instruction *inst = &I;
-
-      if (StoreInst *store = dyn_cast<StoreInst>(inst)) {
-        if (CallInst *CI = dyn_cast<CallInst>(store->getOperand(0))) {
-          doNotDelete.insert(store);
-        } else if (PointerType *PT =
-                       dyn_cast<PointerType>(store->getOperand(0)->getType())) {
-          if (IntegerType *IT =
-                  dyn_cast<IntegerType>(PT->getPointerElementType())) {
-            if (IT->getBitWidth() == 8) {
-              doNotDelete.insert(store);
-              Value *pointer = store->getPointerOperand();
-              if (AllocaInst *all = dyn_cast<AllocaInst>(pointer)) {
-                for (auto U : all->users()) {
-                  if (auto I = dyn_cast<Instruction>(U)) {
-                    doNotDelete.insert(I);
-                    if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
-                      for (auto U2 : LI->users()) {
-                        if (Instruction *U2inst = dyn_cast<Instruction>(U2))
-                          doNotDelete.insert(U2inst);
+      if (dontTouchMofo.find(inst) == dontTouchMofo.end()) {
+        if (StoreInst *store = dyn_cast<StoreInst>(inst)) {
+          if (CallInst *CI = dyn_cast<CallInst>(store->getOperand(0))) {
+            doNotDelete.insert(store);
+          } else if (PointerType *PT = dyn_cast<PointerType>(
+                         store->getOperand(0)->getType())) {
+            if (IntegerType *IT =
+                    dyn_cast<IntegerType>(PT->getPointerElementType())) {
+              if (IT->getBitWidth() == 8) {
+                doNotDelete.insert(store);
+                Value *pointer = store->getPointerOperand();
+                if (AllocaInst *all = dyn_cast<AllocaInst>(pointer)) {
+                  for (auto U : all->users()) {
+                    if (auto I = dyn_cast<Instruction>(U)) {
+                      doNotDelete.insert(I);
+                      if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
+                        for (auto U2 : LI->users()) {
+                          if (Instruction *U2inst = dyn_cast<Instruction>(U2))
+                            doNotDelete.insert(U2inst);
+                        }
                       }
                     }
                   }
                 }
               }
             }
-          }
-        } else {
-          Value *v = store->getValueOperand();         // Constant
-          Value *pointer = store->getPointerOperand(); // Alloca
-          if (ConstantInt *cons = dyn_cast<ConstantInt>(v)) {
-            mapFromPointertoVal[pointer] = cons;
-          }
-          Instruction *ref = dyn_cast<Instruction>(inst->getOperand(0));
-          if (foldMe.count(ref) > 0) {
-            mapFromPointertoVal[pointer] = foldMe[ref];
-            store->setOperand(0, foldMe[ref]);
-            killList.push(ref);
-          }
-        }
-      }
-      if (isa<BinaryOperator>(inst)) {
-        BinaryOperator *binOp = (BinaryOperator *)inst;
-        Value *op1 = binOp->getOperand(0);
-        Value *op2 = binOp->getOperand(1);
-
-        if (isa<LoadInst>(op1) && isa<ConstantInt>(op2)) {
-          LoadInst *load1 = (LoadInst *)op1;
-          Value *pointer1 = load1->getPointerOperand();
-          if (mapFromPointertoVal.count(pointer1) > 0) {
-            ConstantInt *cons1 = mapFromPointertoVal[pointer1];
-            ConstantInt *cons2 = dyn_cast<ConstantInt>(op2);
-            binOp->setOperand(0, cons1);
-            binOp->setOperand(1, cons2);
-            killList.push(load1);
-          }
-        } else if (isa<BinaryOperator>(op1) && isa<LoadInst>(op2)) {
-          LoadInst *load1 = (LoadInst *)op2;
-          Value *pointer1 = load1->getPointerOperand();
-
-          BinaryOperator *bo = dyn_cast<BinaryOperator>(op1);
-          ConstantInt *cons2 = foldMe[bo];
-
-          killList.push(bo);
-
-          if (mapFromPointertoVal.count(pointer1) > 0) {
-            ConstantInt *cons1 = mapFromPointertoVal[pointer1];
-            binOp->setOperand(0, cons1);
-            binOp->setOperand(1, cons2);
-          }
-        } else if (isa<LoadInst>(op1) && isa<BinaryOperator>(op2)) {
-          LoadInst *load1 = (LoadInst *)op1;
-          Value *pointer1 = load1->getPointerOperand();
-
-          BinaryOperator *bo = dyn_cast<BinaryOperator>(op2);
-          ConstantInt *cons2 = foldMe[bo];
-
-          killList.push(bo);
-
-          if (mapFromPointertoVal.count(pointer1) > 0) {
-            ConstantInt *cons1 = mapFromPointertoVal[pointer1];
-            binOp->setOperand(0, cons1);
-            binOp->setOperand(1, cons2);
+          } else {
+            Value *v = store->getValueOperand();         // Constant
+            Value *pointer = store->getPointerOperand(); // Alloca
+            if (ConstantInt *cons = dyn_cast<ConstantInt>(v)) {
+              if (cons)
+                mapFromPointertoVal[pointer] = cons;
+            }
+            Instruction *ref = dyn_cast<Instruction>(inst->getOperand(0));
+            if (foldMe.count(ref) > 0 && foldMe[ref]) {
+              mapFromPointertoVal[pointer] = foldMe[ref];
+              if (foldMe[ref]) {
+                store->setOperand(0, foldMe[ref]);
+                killList.push(ref);
+              }
+            }
           }
         }
+        if (isa<BinaryOperator>(inst)) {
+          BinaryOperator *binOp = (BinaryOperator *)inst;
+          Value *op1 = binOp->getOperand(0);
+          Value *op2 = binOp->getOperand(1);
 
-        else if (isa<LoadInst>(op1) && isa<LoadInst>(op2)) {
-          LoadInst *load1 = (LoadInst *)op1;
-          LoadInst *load2 = (LoadInst *)op2;
+          if (isa<LoadInst>(op1) && isa<ConstantInt>(op2)) {
+            LoadInst *load1 = (LoadInst *)op1;
+            Value *pointer1 = load1->getPointerOperand();
+            if (mapFromPointertoVal.count(pointer1) > 0) {
+              ConstantInt *cons1 = mapFromPointertoVal[pointer1];
 
-          Value *pointer1 = load1->getPointerOperand();
-          Value *pointer2 = load2->getPointerOperand();
+              if (cons1) {
+                binOp->setOperand(0, cons1);
+                killList.push(load1);
+              }
+            }
+          } else if (isa<BinaryOperator>(op1) && isa<LoadInst>(op2)) {
+            LoadInst *load2 = (LoadInst *)op2;
+            Value *pointer2 = load2->getPointerOperand();
 
-          if (mapFromPointertoVal.count(pointer1) > 0 &&
-              mapFromPointertoVal.count(pointer2) > 0) {
-            ConstantInt *cons1 = mapFromPointertoVal[pointer1];
-            ConstantInt *cons2 = mapFromPointertoVal[pointer2];
-            binOp->setOperand(0, cons1);
-            binOp->setOperand(1, cons2);
-            killList.push(load1);
-            killList.push(load2);
+            BinaryOperator *bo = dyn_cast<BinaryOperator>(op1);
+            Instruction *letMetry = dyn_cast<Instruction>(bo);
+            ConstantInt *cons1 = foldConst(letMetry);
+            if (cons1)
+              killList.push(bo);
+
+            if (mapFromPointertoVal.count(pointer2) > 0) {
+              ConstantInt *cons2 = mapFromPointertoVal[pointer2];
+              if (cons1)
+                binOp->setOperand(0, cons1);
+              if (cons2)
+                binOp->setOperand(1, cons2);
+
+              if (!cons1 || !cons2) {
+                doNotDelete.insert(inst);
+                for (auto U : inst->users()) {
+                  if (Instruction *i = dyn_cast<Instruction>(U))
+                    dontTouchMofo.insert(i);
+                }
+              }
+            }
+          } else if (isa<LoadInst>(op1) && isa<BinaryOperator>(op2)) {
+            LoadInst *load1 = (LoadInst *)op1;
+            Value *pointer1 = load1->getPointerOperand();
+
+            BinaryOperator *bo = dyn_cast<BinaryOperator>(op2);
+            Instruction *letMetry = dyn_cast<Instruction>(bo);
+            ConstantInt *cons2 = foldConst(letMetry);
+
+            if (cons2)
+              killList.push(bo);
+
+            if (mapFromPointertoVal.count(pointer1) > 0) {
+              ConstantInt *cons1 = mapFromPointertoVal[pointer1];
+              if (cons1)
+                binOp->setOperand(0, cons1);
+              if (cons2)
+                binOp->setOperand(1, cons2);
+
+              if (!cons1 || !cons2)
+                doNotDelete.insert(inst);
+
+              for (auto U : inst->users()) {
+                if (Instruction *i = dyn_cast<Instruction>(U))
+                  dontTouchMofo.insert(i);
+              }
+            }
           }
 
-        }
+          else if (isa<LoadInst>(op1) && isa<LoadInst>(op2)) {
+            LoadInst *load1 = (LoadInst *)op1;
+            LoadInst *load2 = (LoadInst *)op2;
 
-        else if (isa<LoadInst>(op2) && isa<ConstantInt>(op1)) {
-          LoadInst *load1 = (LoadInst *)op2;
-          Value *pointer1 = load1->getPointerOperand();
-          if (mapFromPointertoVal.count(pointer1) > 0) {
-            ConstantInt *cons1 = mapFromPointertoVal[pointer1];
-            ConstantInt *cons2 = dyn_cast<ConstantInt>(op1);
-            binOp->setOperand(0, cons1);
-            binOp->setOperand(1, cons2);
-            killList.push(load1);
+            Value *pointer1 = load1->getPointerOperand();
+            Value *pointer2 = load2->getPointerOperand();
+
+            if (mapFromPointertoVal.count(pointer1) > 0 &&
+                mapFromPointertoVal.count(pointer2) > 0) {
+              ConstantInt *cons1 = mapFromPointertoVal[pointer1];
+              ConstantInt *cons2 = mapFromPointertoVal[pointer2];
+              if (cons1) {
+                binOp->setOperand(0, cons1);
+                killList.push(load2);
+              }
+              if (cons2) {
+                binOp->setOperand(1, cons2);
+                killList.push(load1);
+              }
+            }
+
           }
+
+          else if (isa<LoadInst>(op2) && isa<ConstantInt>(op1)) {
+            LoadInst *load1 = (LoadInst *)op2;
+            Value *pointer1 = load1->getPointerOperand();
+            if (mapFromPointertoVal.count(pointer1) > 0) {
+              ConstantInt *cons1 = mapFromPointertoVal[pointer1];
+              if (cons1) {
+                binOp->setOperand(0, cons1);
+                killList.push(load1);
+              }
+            }
+          }
+          if (ConstantInt *val = foldConst(inst))
+            foldMe[inst] = val;
         }
-        foldMe[inst] = foldConst(inst);
       }
     }
 
@@ -271,6 +312,7 @@ struct Lab : public BasicBlockPass {
         all->eraseFromParent();
       it++;
     }
+
     return true;
   }
 };
